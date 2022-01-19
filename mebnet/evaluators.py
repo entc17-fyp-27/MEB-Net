@@ -15,7 +15,11 @@ def extract_features(model, data_loader, print_freq=10, metric=None):
     batch_time = AverageMeter()
     data_time = AverageMeter()
 
-    features = OrderedDict()
+    #features = OrderedDict()
+    features_x = OrderedDict()
+    features_xup = OrderedDict()
+    features_xbot = OrderedDict()
+
     labels = OrderedDict()
 
     end = time.time()
@@ -24,9 +28,31 @@ def extract_features(model, data_loader, print_freq=10, metric=None):
             data_time.update(time.time() - end)
 
             outputs = extract_cnn_feature(model, imgs)
-            for fname, output, pid in zip(fnames, outputs, pids):
-                features[fname] = output
+            #print(outputs)
+
+            
+            for fname, output, pid in zip(fnames, outputs[0], pids):
+                features_x[fname] = output
                 labels[fname] = pid
+            for fname, output, pid in zip(fnames, outputs[1], pids):
+                features_xup[fname] = output
+            for fname, output, pid in zip(fnames, outputs[2], pids):
+                features_xbot[fname] = output
+            
+
+            """
+            for fname, output, pid in zip(fnames, outputs, pids):
+                #features[fname] = output
+
+                features_x[fname] = output[0]
+                features_xup[fname] = output[1]
+                features_xbot[fname] = output[2]
+                #print("model: ", model)
+                #print("full size: ", output[0].size())
+                #print("up size: ", output[1].size())
+                #print("bot size: ", output[2].size())
+                labels[fname] = pid
+            """
 
             batch_time.update(time.time() - end)
             end = time.time()
@@ -38,7 +64,8 @@ def extract_features(model, data_loader, print_freq=10, metric=None):
                       .format(i + 1, len(data_loader),
                               batch_time.val, batch_time.avg,
                               data_time.val, data_time.avg))
-
+                              
+    return features_x,features_xup,features_xbot, labels
     return features, labels
 
 def pairwise_distance(features, query=None, gallery=None, metric=None):
@@ -109,7 +136,7 @@ class Evaluator(object):
 
     def evaluate(self, data_loader, query, gallery, metric=None, cmc_flag=False, rerank=False, pre_features=None):
         if (pre_features is None):
-            features, _ = extract_features(self.model, data_loader)
+            features,del_up,del_bot, _ = extract_features(self.model, data_loader)
         else:
             features = pre_features
         distmat, query_features, gallery_features = pairwise_distance(features, query, gallery, metric=metric)

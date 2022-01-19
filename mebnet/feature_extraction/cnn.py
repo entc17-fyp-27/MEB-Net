@@ -10,7 +10,11 @@ def extract_cnn_feature(model, inputs, modules=None):
     inputs = to_torch(inputs).cuda()
     if modules is None:
         outputs = model(inputs)
-        outputs = outputs.data.cpu()
+        
+        #print("Size of the output", len(outputs))
+        outputs[0] = outputs[0].data.cpu()
+        outputs[1] = outputs[1].data.cpu()
+        outputs[2] = outputs[2].data.cpu()
         return outputs
     # Register forward hook for each module
     outputs = OrderedDict()

@@ -202,9 +202,11 @@ class MEBTrainer(object):
         self.criterion_ce = CrossEntropyLabelSmooth(num_cluster).cuda()
         self.criterion_ce_soft = SoftEntropy().cuda()
         self.criterion_tri = SoftTripletLoss(margin=0.0).cuda()
+        self.criterion_tri_up = SoftTripletLoss(margin=0.0).cuda()
+        self.criterion_tri_bot = SoftTripletLoss(margin=0.0).cuda()
         self.criterion_tri_soft = SoftTripletLoss(margin=None).cuda()
 
-    def train(self, epoch, data_loader_target,
+    def train(self, epoch, data_loader_target,data_loader_target_up,data_loader_target_bot,
             optimizer, ce_soft_weight=0.5, tri_soft_weight=0.5, print_freq=1, train_iters=200):
         for model in self.models:
             model.train()
@@ -216,6 +218,8 @@ class MEBTrainer(object):
 
         losses_ce = AverageMeter()
         losses_tri = AverageMeter()
+        losses_tri_up = AverageMeter()
+        losses_tri_bot = AverageMeter()
         losses_ce_soft = AverageMeter()
         losses_tri_soft = AverageMeter()
         precisions = [AverageMeter() for i in range(self.model_num)]
@@ -223,34 +227,46 @@ class MEBTrainer(object):
         end = time.time()
         for iter_idx in range(train_iters):
             target_inputs = data_loader_target.next()
+            target_inputs_up = data_loader_target_up.next()
+            target_inputs_bot = data_loader_target_bot.next()
             data_time.update(time.time() - end)
 
             # process inputs
             inputs, targets = self._parse_data(target_inputs)
+            inputs_up, targets_up = self._parse_data(target_inputs_up)
+            inputs_bot, targets_bot = self._parse_data(target_inputs_bot)
 
             # forward
             f_out_t = []
+            f_out_t_up = []
+            f_out_t_bot = []
             p_out_t = []
             for i in range(self.model_num):
-                f_out_t_i, p_out_t_i = self.models[i](inputs[i])
+                f_out_t_i,f_out_t_i_up,f_out_t_i_bot, p_out_t_i = self.models[i](inputs[i])
                 f_out_t.append(f_out_t_i)
+                f_out_t_up.append(f_out_t_i_up)
+                f_out_t_bot.append(f_out_t_i_bot)
                 p_out_t.append(p_out_t_i)
 
             f_out_t_ema = []
             p_out_t_ema = []
             for i in range(self.model_num):
-                f_out_t_ema_i, p_out_t_ema_i = self.model_emas[i](inputs[i])
+                f_out_t_ema_i,feat_up_cross,feat_bot_cross, p_out_t_ema_i = self.model_emas[i](inputs[i])
                 f_out_t_ema.append(f_out_t_ema_i)
                 p_out_t_ema.append(p_out_t_ema_i)
 
             
             authority_ce = []
             authority_tri = []
+            #authority_tri_up = []
+            #authority_tri_bot = []
 
-            loss_ce = loss_tri = 0
+            loss_ce = loss_tri = loss_tri_up = loss_tri_bot = 0
             for i in range(self.model_num):
                 loss_ce += self.criterion_ce(p_out_t[i], targets)
                 loss_tri += self.criterion_tri(f_out_t[i], f_out_t[i], targets)
+                loss_tri_up += self.criterion_tri(f_out_t_up[i], f_out_t_up[i], targets_up)
+                loss_tri_bot += self.criterion_tri(f_out_t_bot[i], f_out_t_bot[i], targets_bot)
 
                 authority_ce.append(self.criterion_ce(p_out_t[i], targets))
                 authority_tri.append(self.criterion_tri(f_out_t[i], f_out_t[i], targets))
@@ -267,7 +283,8 @@ class MEBTrainer(object):
                         loss_tri_soft += 0.5*authority[i]*self.criterion_tri_soft(f_out_t[j], f_out_t_ema[i], targets)
 
             loss = loss_ce*(1-ce_soft_weight) + \
-                     loss_tri*(1-tri_soft_weight) + \
+                     loss_tri*((1-tri_soft_weight)/3) + loss_tri_up*((1-tri_soft_weight)/3) + \
+                         loss_tri_bot*((1-tri_soft_weight)/3) + \
                      loss_ce_soft*ce_soft_weight + loss_tri_soft*tri_soft_weight
 
             optimizer.zero_grad()
@@ -283,6 +300,8 @@ class MEBTrainer(object):
 
             losses_ce.update(loss_ce.item())
             losses_tri.update(loss_tri.item())
+            losses_tri_up.update(loss_tri_up.item())
+            losses_tri_bot.update(loss_tri_bot.item())
             losses_ce_soft.update(loss_ce_soft.item())
             losses_tri_soft.update(loss_tri_soft.item())
             precisions[0].update(prec_1[0])

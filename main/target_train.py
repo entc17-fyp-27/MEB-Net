@@ -50,6 +50,8 @@ def get_train_loader(dataset, height, width, batch_size, workers,
          ])
 
     train_set = dataset.train
+    train_set_up = dataset.train_up
+    train_set_bot = dataset.train_bot
     rmgs_flag = num_instances > 0
     if rmgs_flag:
         sampler = RandomMultipleGallerySampler(train_set, num_instances)
@@ -61,7 +63,19 @@ def get_train_loader(dataset, height, width, batch_size, workers,
                             batch_size=batch_size, num_workers=workers, sampler=sampler,
                             shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
 
-    return train_loader
+    train_loader_up = IterLoader(
+                DataLoader(Preprocessor(train_set_up, root=dataset.images_dir,
+                                        transform=train_transformer, mutual=3),
+                            batch_size=batch_size, num_workers=workers, sampler=sampler,
+                            shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+
+    train_loader_bot = IterLoader(
+                DataLoader(Preprocessor(train_set_bot, root=dataset.images_dir,
+                                        transform=train_transformer, mutual=3),
+                            batch_size=batch_size, num_workers=workers, sampler=sampler,
+                            shuffle=not rmgs_flag, pin_memory=True, drop_last=True), length=iters)
+
+    return train_loader,train_loader_up, train_loader_bot
 
 def get_test_loader(dataset, height, width, batch_size, workers, testset=None):
     normalizer = T.Normalize(mean=[0.485, 0.456, 0.406],
@@ -150,16 +164,25 @@ def main_worker(args):
     clusters = [args.num_clusters]*args.epochs
     feature_length = args.features if args.features>0 else 2048
     moving_avg_features = np.zeros((len(dataset_target.train), feature_length))
+    #print("moving: " , moving_avg_features.shape) 12936, 2048
 
     for nc in range(len(clusters)):
         cluster_loader = get_test_loader(dataset_target, args.height, args.width, args.batch_size, args.workers, testset=dataset_target.train)
 
         cf = []
+        cf_up=[]
+        cf_bot=[]
         scatter = []
         for i in range(len(model_ema_list)):
-            dict_f, _ = extract_features(model_ema_list[i], cluster_loader, print_freq=50)
+            dict_f,dict_up,dict_bot, _ = extract_features(model_ema_list[i], cluster_loader, print_freq=50)
+            #dict_f, _ = extract_features(model_ema_list[i], cluster_loader, print_freq=50)
             cf_i = torch.stack(list(dict_f.values())).numpy()
+            #check the dimension of cf_i with MEB's
+            cf_iu = torch.stack(list(dict_up.values())).numpy()
+            cf_ib = torch.stack(list(dict_bot.values())).numpy()
             cf.append(cf_i)
+            cf_up.append(cf_iu)
+            cf_bot.append(cf_ib)
             
             if args.scatter:
             #compute J scatter
@@ -174,33 +197,56 @@ def main_worker(args):
 
 
         cf_avg = np.zeros_like(cf[0])
+        cf_avgup = np.zeros_like(cf_up[0])
+        cf_avgbot = np.zeros_like(cf_bot[0])
 
         for i in range(len(cf)):
             cf_avg += cf[i]
+            cf_avgup += cf_up[i]
+            cf_avgbot += cf_bot[i]
         cf = cf_avg/len(cf)
+        print("cf : ", cf.shape)
+        cf_up = cf_avgup/len(cf)
+        cf_bot = cf_avgbot/len(cf)
 
         moving_avg_features = moving_avg_features*args.moving_avg_momentum+cf*(1-args.moving_avg_momentum)
         moving_avg_features = moving_avg_features / (1-args.moving_avg_momentum**(nc+1))
+        moving_avg_features_up=cf_up
+        moving_avg_features_bot=cf_bot
+
         
 
         # import pdb;pdb.set_trace()
         print('\n Clustering into {} classes \n'.format(clusters[nc]))
         # km = KMeans(n_clusters=clusters[nc], random_state=args.seed, n_jobs=2).fit(moving_avg_features)
         km = MiniBatchKMeans(n_clusters=clusters[nc], max_iter=100, batch_size=100, init_size=1500).fit(moving_avg_features)
+        km_up = MiniBatchKMeans(n_clusters=clusters[nc], max_iter=100, batch_size=100, init_size=1500).fit(moving_avg_features_up)
+        km_bot = MiniBatchKMeans(n_clusters=clusters[nc], max_iter=100, batch_size=100, init_size=1500).fit(moving_avg_features_bot)
         
         for i in range(len(model_ema_list)):
             model_list[i].module.classifier.weight.data.copy_(torch.from_numpy(normalize(km.cluster_centers_, axis=1)).float().cuda())
             model_ema_list[i].module.classifier.weight.data.copy_(torch.from_numpy(normalize(km.cluster_centers_, axis=1)).float().cuda())
 
         target_label = km.labels_
+        target_label_up=km_up.labels_
+        target_label_bot=km_bot.labels_
 
         # change pseudo labels
         for i in range(len(dataset_target.train)):
             dataset_target.train[i] = list(dataset_target.train[i])
             dataset_target.train[i][1] = int(target_label[i])
             dataset_target.train[i] = tuple(dataset_target.train[i])
+            """
+            """
+            dataset_target.train_up[i] = list(dataset_target.train_up[i])
+            dataset_target.train_up[i][1] = int(target_label_up[i])
+            dataset_target.train_up[i] = tuple(dataset_target.train_up[i])
 
-        train_loader_target = get_train_loader(dataset_target, args.height, args.width,
+            dataset_target.train_bot[i] = list(dataset_target.train_bot[i])
+            dataset_target.train_bot[i][1] = int(target_label_bot[i])
+            dataset_target.train_bot[i] = tuple(dataset_target.train_bot[i])
+
+        train_loader_target,train_loader_target_up, train_loader_target_bot = get_train_loader(dataset_target, args.height, args.width,
                                             args.batch_size, args.workers, args.num_instances, iters)
 
         # Optimizer
@@ -217,9 +263,11 @@ def main_worker(args):
                                 num_cluster=clusters[nc], alpha=args.alpha, scatter=scatter)
 
         train_loader_target.new_epoch()
+        train_loader_target_up.new_epoch()
+        train_loader_target_bot.new_epoch()
         epoch = nc
 
-        trainer.train(epoch, train_loader_target, optimizer,
+        trainer.train(epoch, train_loader_target,train_loader_target_up,train_loader_target_bot, optimizer,
                     ce_soft_weight=args.soft_ce_weight, tri_soft_weight=args.soft_tri_weight,
                     print_freq=args.print_freq, train_iters=len(train_loader_target))
 

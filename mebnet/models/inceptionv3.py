@@ -49,6 +49,7 @@ class InceptionV3(nn.Module):
                 # Change the num_features to CNN output channels
                 self.num_features = out_planes
                 self.feat_bn = nn.BatchNorm1d(self.num_features)
+                #self.feat_bn_ub = nn.BatchNorm1d(2048)
             self.feat_bn.bias.requires_grad_(False)
             if self.dropout > 0:
                 self.drop = nn.Dropout(self.dropout)
@@ -64,28 +65,49 @@ class InceptionV3(nn.Module):
     def forward(self, x, feature_withbn=False):
         x = self.base(x)
 
+        h=x.size(2)
+        x_split=[]
+        xd_split=[x[:, :, h // 2 * s: h // 2 * (s+1), :] for s in range(2)]
+        for xx in xd_split:
+            xx = self.gap(xx)
+            x_split.append(xx.view(xx.size(0), -1))
+
         x = self.gap(x)
         x = x.view(x.size(0), -1)
 
         if self.cut_at_pooling:
+            return [x,x_split[0],x_split[1]]
             return x
 
         if self.has_embedding:
             bn_x = self.feat_bn(self.feat(x))
+            bn_x_up = self.feat_bn(self.feat(x_split[0]))
+            bn_x_bot = self.feat_bn(self.feat(x_split[1]))
         else:
             bn_x = self.feat_bn(x)
+            bn_x_up = self.feat_bn(x_split[0])
+            bn_x_bot = self.feat_bn(x_split[1])
 
         if self.training is False:
             bn_x = F.normalize(bn_x)
+            bn_x_up = F.normalize(bn_x_up)
+            bn_x_bot = F.normalize(bn_x_bot)
+            return [bn_x,bn_x_up,bn_x_bot]
             return bn_x
 
         if self.norm:
             bn_x = F.normalize(bn_x)
+            bn_x_up = F.normalize(bn_x_up)
+            bn_x_bot = F.normalize(bn_x_bot)
         elif self.has_embedding:
             bn_x = F.relu(bn_x)
+            bn_x_up = F.relu(bn_x_up)
+            bn_x_bot = F.relu(bn_x_bot)
 
         if self.dropout > 0:
             bn_x = self.drop(bn_x)
+            bn_x_up = self.drop(bn_x_up)
+            bn_x_bot = self.drop(bn_x_bot)
 
         if self.num_classes > 0:
             prob = self.classifier(bn_x)
@@ -93,8 +115,8 @@ class InceptionV3(nn.Module):
             return x, bn_x
 
         if feature_withbn:
-            return bn_x, prob
-        return x, prob
+            return bn_x, bn_x_up,bn_x_bot, prob
+        return x,x_split[0],x_split[1], prob
 
 
 
